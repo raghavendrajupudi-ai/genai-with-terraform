@@ -12,7 +12,7 @@ env:
   REGION: us-central1
   REPOSITORY: genai-terraform
   SERVICE_NAME: genai-terraform-app
-  WORKLOAD_IDENTITY_PROVIDER: projects/${{ secrets.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+  WORKLOAD_IDENTITY_PROVIDER: projects/237160987996/locations/global/workloadIdentityPools/github-pool/providers/github-provider
   SERVICE_ACCOUNT: github-actions@cloudarchitect-pca.iam.gserviceaccount.com
 
 jobs:
