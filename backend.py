@@ -4,17 +4,25 @@ Handles LangChain integration and Gemini API communication with RAG
 """
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.memory import ConversationBufferMemory
-#from langchain_community.memory import ConversationBufferMemory
-#from langchain_community.memory.buffer import ConversationBufferMemory
-#from langchain_community.chat_memory import ConversationBufferMemory
-
-from langchain.chains import ConversationChain
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
+from langchain_core.prompts import PromptTemplate
 from typing import Optional
 import os
 from rag_loader import TerraformRAG
+
+# Simple memory implementation for conversation history
+class ConversationBufferMemory:
+    def __init__(self):
+        self.messages = []
+        
+    def save_context(self, inputs, outputs):
+        self.messages.append({"input": inputs.get("input", ""), "output": outputs.get("output", "")})
+        
+    def clear(self):
+        self.messages = []
+        
+    @property
+    def buffer_as_messages(self):
+        return self.messages
 
 
 class AIBackend:
@@ -24,8 +32,8 @@ class AIBackend:
     
     def __init__(self):
         """Initialize the backend with default values"""
-        self.conversation_chain: Optional[ConversationChain] = None
-        self.rag_chain: Optional[LLMChain] = None
+        self.llm = None  # Store the LLM instance
+        self.rag_prompt_template = None  # Store the RAG prompt template
         self.memory: ConversationBufferMemory = ConversationBufferMemory()
         self.current_api_key: Optional[str] = None
         self.current_model: Optional[str] = None
@@ -53,7 +61,7 @@ class AIBackend:
         """
         # Check if we need to reinitialize (model or key changed)
         if (
-            self.conversation_chain is None
+            self.llm is None
             or self.current_api_key != api_key
             or self.current_model != model_name
             or self.current_temperature != temperature
@@ -64,18 +72,11 @@ class AIBackend:
                 os.environ["GOOGLE_API_KEY"] = api_key
                 
                 # Initialize LLM
-                llm = ChatGoogleGenerativeAI(
+                self.llm = ChatGoogleGenerativeAI(
                     model=model_name,
                     temperature=temperature,
                     max_output_tokens=max_tokens,
                     google_api_key=api_key
-                )
-                
-                # Create conversation chain
-                self.conversation_chain = ConversationChain(
-                    llm=llm,
-                    memory=self.memory,
-                    verbose=False
                 )
                 
                 # Initialize RAG with Terraform files
@@ -83,8 +84,8 @@ class AIBackend:
                     self.terraform_rag = TerraformRAG(terraform_dir="terraform_files")
                     self.terraform_rag.create_vector_store(api_key)
                     
-                    # Create RAG chain
-                    rag_prompt = PromptTemplate(
+                    # Create RAG prompt template
+                    self.rag_prompt_template = PromptTemplate(
                         input_variables=["context", "question"],
                         template="""You are a Terraform documentation assistant. Use only the provided Terraform configuration context to answer the question. Present the answer clearly. 
 
@@ -95,30 +96,6 @@ class AIBackend:
                     {question}
 
                     Answer:"""
-                    )                    
-#                     rag_prompt = PromptTemplate(
-#                         input_variables=["context", "question"],
-#                         template="""You are a Terraform documentation assistant. Your ONLY job is to answer questions based on the provided Terraform configuration files.
-
-# STRICT RULES:
-# 1. ONLY answer based on the exact content provided in the context below
-# 3. Do NOT make assumptions or inferences beyond what is explicitly stated in the context
-# 4. If the context contains relevant information, provide a direct answer citing the source file
-# 5. If the context does NOT contain relevant information, respond with: "This information is not available in the provided Terraform files."
-
-
-# Terraform Configuration Context:
-# {context}
-
-# Question: {question}
-
-# Answer:"""
-#                     )
-                    
-                    self.rag_chain = LLMChain(
-                        llm=llm,
-                        prompt=rag_prompt,
-                        verbose=False
                     )
                 except Exception as e:
                     print(f"Warning: RAG initialization failed: {str(e)}. Continuing without RAG.")
@@ -148,11 +125,11 @@ class AIBackend:
         Raises:
             Exception: If the conversation chain is not initialized
         """
-        if self.conversation_chain is None:
-            raise Exception("Conversation chain not initialized. Please provide API key and settings.")
+        if self.llm is None:
+            raise Exception("LLM not initialized. Please provide API key and settings.")
         
         # RAG must be available and initialized - do not fall back to generic LLM
-        if not (self.use_rag and self.terraform_rag and self.rag_chain):
+        if not (self.use_rag and self.terraform_rag and self.rag_prompt_template):
             raise Exception("RAG system not initialized. Cannot generate response without Terraform context.")
         
         try:
@@ -164,11 +141,12 @@ class AIBackend:
                 # No relevant context found - return message indicating this
                 response = "I cannot answer this question as it is not covered in the provided Terraform files. Please ask about resources and configurations defined in your GCP Terraform files."
             else:
-                # Generate response using RAG chain with retrieved context
-                response = self.rag_chain.run(
+                # Generate response using LLM with formatted prompt
+                formatted_prompt = self.rag_prompt_template.format(
                     context=context,
                     question=user_input
                 )
+                response = self.llm.invoke(formatted_prompt).content
             
             # Also store in conversation memory
             self.memory.save_context({"input": user_input}, {"output": response})
@@ -180,7 +158,7 @@ class AIBackend:
     def clear_memory(self) -> None:
         """Clear the conversation memory and reset the chain"""
         self.memory.clear()
-        self.conversation_chain = None
+        self.llm = None
     
     def get_conversation_history(self) -> dict:
         """
@@ -196,9 +174,9 @@ class AIBackend:
         Check if the backend is ready to generate responses
         
         Returns:
-            True if conversation chain is initialized, False otherwise
+            True if LLM is initialized, False otherwise
         """
-        return self.conversation_chain is not None
+        return self.llm is not None
     
     def get_infrastructure_summary(self) -> dict:
         """
