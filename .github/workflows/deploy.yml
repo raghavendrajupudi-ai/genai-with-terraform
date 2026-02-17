@@ -12,8 +12,8 @@ env:
   REGION: us-central1
   REPOSITORY: genai-terraform
   SERVICE_NAME: genai-terraform-app
-  PROJECT_NUMBER: ${{ secrets.PROJECT_NUMBER }}  # Replace with your actual project number
-  WORKLOAD_IDENTITY_PROVIDER: projects/${{ env.PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+  #PROJECT_NUMBER: ${{ secrets.PROJECT_NUMBER }}  # Replace with your actual project number
+  WORKLOAD_IDENTITY_PROVIDER: projects/${{ secrets.PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-pool/providers/github-provider
   SERVICE_ACCOUNT: ${{ secrets.SERVICE_ACCOUNT }}  # Replace with your service account email, e.g.,
 
 jobs:
