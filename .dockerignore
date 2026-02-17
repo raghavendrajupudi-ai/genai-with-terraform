@@ -1,0 +1,51 @@
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Environment files (should be passed at runtime)
+.env
+
+# Documentation
+*.md
+ARCHITECTURE_DIAGRAMS.md
+CHUNKING_IMPLEMENTATION_COMPLETE.txt
+EXAMPLES.py
+RAG_CONFIG.py
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test files
+test_*.py
+*_test.py
+tests/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
