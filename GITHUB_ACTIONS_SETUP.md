@@ -2,6 +2,23 @@
 
 This guide will help you set up automated deployment to Google Cloud Run using GitHub Actions.
 
+**Recommended Approach:** Method 2 (Workload Identity Federation) - More secure, no long-lived credentials
+
+## Quick Setup Summary (Method 2)
+
+For those who want a quick overview, here are the main steps:
+
+1. Create Workload Identity Pool and Provider (OIDC with GitHub)
+2. Create `github-actions` service account (for CI/CD operations)
+3. Bind GitHub repository to service account via workload identity
+4. Create Artifact Registry repository
+5. Create `cloud-run-sa` service account (for runtime with minimal permissions)
+6. Grant Secret Manager access to `cloud-run-sa`
+7. Add `GCP_PROJECT_NUMBER` to GitHub Secrets
+8. Deploy via GitHub Actions
+
+---
+
 ## Method 1: Using Service Account Key (Simpler)
 
 ### Step 1: Create Service Account
@@ -100,8 +117,11 @@ gcloud iam workload-identity-pools providers create-oidc github-provider \
   --workload-identity-pool=github-pool \
   --display-name="GitHub Provider" \
   --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository" \
-  --attribute-condition="assertion.repository_owner=='YOUR_GITHUB_USERNAME'" \
   --issuer-uri="https://token.actions.githubusercontent.com"
+
+# OPTIONAL: Add attribute condition to restrict to specific GitHub user/org
+# Only use if you want to limit access to repositories from a specific owner
+# --attribute-condition="assertion.repository_owner=='YOUR_GITHUB_USERNAME'"
 ```
 
 ### Step 2: Create Service Account and Grant Permissions
@@ -155,19 +175,97 @@ gcloud iam service-accounts add-iam-policy-binding \
   --member="principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/attribute.repository/$REPO"
 ```
 
-### Step 4: Update Workflow File
+### Step 4: Create Artifact Registry Repository
 
-Edit `.github/workflows/deploy-with-workload-identity.yml` and update:
-- `WORKLOAD_IDENTITY_PROVIDER`: Replace `PROJECT_NUMBER` with your actual project number
-- `SERVICE_ACCOUNT`: Should be `github-actions@cloudarchitect-pca.iam.gserviceaccount.com`
-
-Then rename it to be the active workflow:
 ```bash
-# Disable the service account key workflow
-mv .github/workflows/deploy.yml .github/workflows/deploy.yml.backup
+# Create Docker repository in Artifact Registry
+gcloud artifacts repositories create genai-terraform \
+  --repository-format=docker \
+  --location=us-central1 \
+  --project=cloudarchitect-pca \
+  --description="Docker repository for GenAI Terraform app"
 
-# Enable the workload identity workflow
-mv .github/workflows/deploy-with-workload-identity.yml .github/workflows/deploy.yml
+# Grant github-actions service account write access
+gcloud artifacts repositories add-iam-policy-binding genai-terraform \
+  --location=us-central1 \
+  --member="serviceAccount:github-actions@cloudarchitect-pca.iam.gserviceaccount.com" \
+  --role="roles/artifactregistry.writer" \
+  --project=cloudarchitect-pca
+```
+
+### Step 5: Create Dedicated Cloud Run Service Account (Best Practice)
+
+```bash
+# Create a dedicated service account for Cloud Run (better security than default compute account)
+gcloud iam service-accounts create cloud-run-sa \
+  --display-name="Cloud Run Service Account" \
+  --project=cloudarchitect-pca
+
+# Grant Secret Manager access (for accessing google-api-key)
+gcloud secrets add-iam-policy-binding google-api-key \
+  --member="serviceAccount:cloud-run-sa@cloudarchitect-pca.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor" \
+  --project=cloudarchitect-pca
+
+# Grant the github-actions service account permission to act as the Cloud Run service account
+gcloud iam service-accounts add-iam-policy-binding cloud-run-sa@cloudarchitect-pca.iam.gserviceaccount.com \
+  --member="serviceAccount:github-actions@cloudarchitect-pca.iam.gserviceaccount.com" \
+  --role="roles/iam.serviceAccountUser" \
+  --project=cloudarchitect-pca
+
+# Verify the setup
+gcloud iam service-accounts describe cloud-run-sa@cloudarchitect-pca.iam.gserviceaccount.com \
+  --project=cloudarchitect-pca
+```
+
+**Benefits of dedicated Cloud Run service account:**
+- ✅ Principle of least privilege (only Secret Manager access)
+- ✅ Better isolation from default compute account
+- ✅ Easier to audit and manage permissions
+- ✅ More secure than using default service accounts
+
+### Step 6: Add GitHub Secrets
+
+1. **Get your project number:**
+```bash
+gcloud projects describe cloudarchitect-pca --format="value(projectNumber)"
+```
+
+2. **Add to GitHub repository:**
+   - Go to: `https://github.com/YOUR_USERNAME/YOUR_REPO/settings/secrets/actions`
+   - Click **New repository secret**
+   - Add the following secret:
+     - **Name**: `GCP_PROJECT_NUMBER`
+     - **Value**: (paste the project number from step 1)
+   - Click **Add secret**
+
+### Step 7: Verify Workflow File Configuration
+
+Ensure your `.github/workflows/deploy.yml` has the following configuration:
+
+```yaml
+env:
+  PROJECT_ID: cloudarchitect-pca
+  REGION: us-central1
+  REPOSITORY: genai-terraform
+  SERVICE_NAME: genai-terraform-app
+  WORKLOAD_IDENTITY_PROVIDER: projects/${{ secrets.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+  SERVICE_ACCOUNT: github-actions@cloudarchitect-pca.iam.gserviceaccount.com
+```
+
+And in the deploy step, verify it uses the dedicated Cloud Run service account:
+
+```yaml
+flags: |
+  --port=8501
+  --memory=2Gi
+  --cpu=2
+  --timeout=300
+  --allow-unauthenticated
+  --min-instances=0
+  --max-instances=10
+  --service-account=cloud-run-sa@cloudarchitect-pca.iam.gserviceaccount.com
+  --set-secrets=GOOGLE_API_KEY=google-api-key:latest
 ```
 
 ---
@@ -235,17 +333,49 @@ gcloud artifacts repositories describe genai-terraform \
 gcloud artifacts repositories create genai-terraform \
   --repository-format=docker \
   --location=us-central1 \
+  --project=cloudarchitect-pca \
+  --description="Docker repository for GenAI Terraform app"
+
+# Grant permissions
+gcloud artifacts repositories add-iam-policy-binding genai-terraform \
+  --location=us-central1 \
+  --member="serviceAccount:github-actions@cloudarchitect-pca.iam.gserviceaccount.com" \
+  --role="roles/artifactregistry.writer" \
   --project=cloudarchitect-pca
 ```
 
-**Secret Not Found:**
+**Secret Not Found or Permission Denied:**
 ```bash
 # List secrets
 gcloud secrets list --project=cloudarchitect-pca
 
 # Create if needed
-echo "your_api_key" | gcloud secrets create google-api-key \
+echo "your_google_gemini_api_key" | gcloud secrets create google-api-key \
   --data-file=- \
+  --project=cloudarchitect-pca
+
+# Grant Cloud Run service account access
+gcloud secrets add-iam-policy-binding google-api-key \
+  --member="serviceAccount:cloud-run-sa@cloudarchitect-pca.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor" \
+  --project=cloudarchitect-pca
+```
+
+**Workload Identity Federation Issues:**
+```bash
+# Verify PROJECT_NUMBER is set correctly in GitHub secrets
+PROJECT_NUMBER=$(gcloud projects describe cloudarchitect-pca --format="value(projectNumber)")
+echo "Project Number: $PROJECT_NUMBER"
+
+# Check workload identity pool exists
+gcloud iam workload-identity-pools describe github-pool \
+  --location=global \
+  --project=cloudarchitect-pca
+
+# Check provider configuration
+gcloud iam workload-identity-pools providers describe github-provider \
+  --workload-identity-pool=github-pool \
+  --location=global \
   --project=cloudarchitect-pca
 ```
 
@@ -253,12 +383,18 @@ echo "your_api_key" | gcloud secrets create google-api-key \
 
 ## Security Best Practices
 
-1. **Rotate service account keys regularly** (if using Method 1)
-2. **Use Workload Identity Federation for production** (Method 2)
-3. **Never commit secrets to repository**
-4. **Use separate service accounts for different environments**
-5. **Apply principle of least privilege for IAM roles**
-6. **Enable Cloud Audit Logs for tracking**
+1. ✅ **Use Workload Identity Federation** instead of service account keys (no long-lived credentials)
+2. ✅ **Use dedicated Cloud Run service account** with minimal permissions (principle of least privilege)
+3. ✅ **Store sensitive values in GitHub Secrets** (never commit to repository)
+4. ✅ **Use separate service accounts** for different environments (dev, staging, prod)
+5. ✅ **Grant only necessary IAM roles** to each service account
+6. ✅ **Enable Cloud Audit Logs** for tracking and compliance
+7. ✅ **Regularly review IAM policies** and remove unused permissions
+8. ✅ **Use Secret Manager** for runtime secrets instead of environment variables
+
+**Service Accounts Summary:**
+- `github-actions@cloudarchitect-pca.iam.gserviceaccount.com` - For CI/CD deployment operations
+- `cloud-run-sa@cloudarchitect-pca.iam.gserviceaccount.com` - For Cloud Run runtime (minimal permissions)
 
 ---
 

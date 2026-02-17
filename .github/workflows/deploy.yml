@@ -70,6 +70,7 @@ jobs:
             --allow-unauthenticated
             --min-instances=0
             --max-instances=10
+            --service-account=cloud-run-sa@cloudarchitect-pca.iam.gserviceaccount.com
             --set-secrets=GOOGLE_API_KEY=google-api-key:latest
 
       - name: Show deployment URL
